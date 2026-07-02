@@ -1,0 +1,113 @@
+import os
+import subprocess
+import threading
+import queue
+import time
+from tqdm import tqdm
+
+STEAMCMD_PATH = r"C:\SteamCMD\steamcmd.exe"
+APP_ID = "233860"
+WORKERS = 3
+
+MODS_FILE = "mods.txt"
+DOWNLOAD_DIR = "downloads"
+LOG_FILE = "download.log"
+FAILED_FILE = "failed.txt"
+
+if not os.path.exists(DOWNLOAD_DIR):
+    os.makedirs(DOWNLOAD_DIR)
+
+with open(MODS_FILE, "r", encoding="utf-8") as f:
+    mods = [line.strip() for line in f if line.strip()]
+
+task_queue = queue.Queue()
+for m in mods:
+    task_queue.put(m)
+
+lock = threading.Lock()
+progress = tqdm(total=len(mods), desc="Downloading", unit="mod")
+
+failed = []
+
+def log(msg):
+    with lock:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+        print(msg)
+
+def download_mod(workshop_id):
+    cmd = [
+        STEAMCMD_PATH,
+        "+login", "anonymous",
+        "+workshop_download_item", APP_ID, workshop_id,
+        "+quit"
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True
+        )
+
+        output = result.stdout + result.stderr
+
+        if "ERROR" in output or "failed" in output.lower():
+            return False, output
+
+        return True, output
+
+    except Exception as e:
+        return False, str(e)
+
+def worker():
+    while not task_queue.empty():
+        try:
+            mod = task_queue.get_nowait()
+        except queue.Empty:
+            return
+
+        success = False
+        retries = 3
+
+        for attempt in range(retries):
+            ok, output = download_mod(mod)
+
+            if ok:
+                log(f"[OK] {mod}")
+                success = True
+                break
+            else:
+                log(f"[FAIL attempt {attempt+1}] {mod}")
+                time.sleep(1)
+
+        if not success:
+            with lock:
+                failed.append(mod)
+
+        with lock:
+            progress.update(1)
+
+        task_queue.task_done()
+
+threads = []
+
+for i in range(WORKERS):
+    t = threading.Thread(target=worker)
+    t.start()
+    threads.append(t)
+
+for t in threads:
+    t.join()
+
+progress.close()
+
+with open(FAILED_FILE, "w", encoding="utf-8") as f:
+    for item in failed:
+        f.write(item + "\n")
+
+print("\nDONE")
+print(f"Total mods: {len(mods)}")
+print(f"Failed: {len(failed)}")
+print(f"Saved log: {LOG_FILE}")
+print(f"Failed list: {FAILED_FILE}")
